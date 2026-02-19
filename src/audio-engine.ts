@@ -70,6 +70,10 @@ export class AudioEngine {
   private lockedFilterFreq: number | null = null;
   private framesSinceDetection: number = Infinity;
 
+  // Debounce: minimum time after first note before detecting second
+  private firstNoteLockedAt: number = 0;
+  private readonly noteDebounceMs: number = 300;
+
   // Residual energy tracking: detect when new energy appears
   private baselineResidualEnergy: number = 0;
   private residualEnergyFrames: number = 0;
@@ -196,6 +200,7 @@ export class AudioEngine {
     this.lockedPartials = [];
     this.lockedFilterFreq = null;
     this.framesSinceDetection = Infinity;
+    this.firstNoteLockedAt = 0;
     this.baselineResidualEnergy = 0;
     this.residualEnergyFrames = 0;
     this.pendingSecondMidi = -1;
@@ -269,6 +274,7 @@ export class AudioEngine {
       this.firstNote = note;
       this.phase = 'single';
       this.framesSinceDetection = 0;
+      this.firstNoteLockedAt = performance.now();
       this.state.phase = 'single';
       this.state.notes = [note];
       this.state.intervalLabel = midiToNoteName(note.midi);
@@ -278,6 +284,15 @@ export class AudioEngine {
   /** single: first note locked, look for second */
   private analyzeSingle(): void {
     const mags = this.magnitudes!;
+
+    // Debounce: don't look for second note until cooldown expires
+    const elapsed = performance.now() - this.firstNoteLockedAt;
+    if (elapsed < this.noteDebounceMs) {
+      this.framesSinceDetection = 0;
+      this.state.notes = [this.firstNote!];
+      this.state.intervalLabel = midiToNoteName(this.firstNote!.midi);
+      return;
+    }
 
     // Measure residual energy (spectrum after subtracting note 1)
     const residual = this.detector.residualEnergy(mags, this.firstNote!.frequency);
@@ -350,6 +365,7 @@ export class AudioEngine {
       // Different note — switch to it and re-baseline
       this.firstNote = recheck;
       this.framesSinceDetection = 0;
+      this.firstNoteLockedAt = performance.now();
       this.baselineResidualEnergy = 0;
       this.residualEnergyFrames = 0;
       this.pendingSecondMidi = -1;
