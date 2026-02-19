@@ -284,7 +284,7 @@ export class AudioEngine {
         const B2 = getInharmonicityB(Math.max(1, Math.min(88, key2)), this.pianoType);
         this.lockedPartials = findCoincidentPartials(
           midiToFreq(low.midi), midiToFreq(high.midi),
-          B1, B2, 16, 80
+          B1, B2, 8, 80
         );
         this.lockedFilterFreq = this.lockedPartials.length > 0
           ? this.lockedPartials[0].centerFreq

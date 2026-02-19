@@ -1,22 +1,23 @@
 /**
  * Polyphonic pitch detection for two-note piano intervals.
  *
- * Strategy: Harmonic Product Spectrum (HPS) variant with iterative
- * subtraction for polyphonic detection.
+ * Strategy: Harmonic Product Spectrum (HPS) with bidirectional
+ * subtraction for robust polyphonic detection.
  *
- * 1. Compute FFT magnitude spectrum
- * 2. Apply Harmonic Product Spectrum to find the strongest pitch
- * 3. Remove that pitch's harmonics from the spectrum (spectral subtraction)
- * 4. Apply HPS again to find the second pitch
+ * Forward pass:
+ * 1. HPS on weighted spectrum → strongest pitch
+ * 2. Subtract that pitch's harmonics (tapered strength)
+ * 3. HPS on residual → second pitch
  *
- * HPS is robust to missing fundamentals because it multiplies
- * downsampled copies of the spectrum — even if the fundamental is weak,
- * the upper harmonics will reinforce the correct f0.
+ * Reverse pass (for wide intervals like 3:1, 5:1):
+ * 1. Find dominant note, suppress only its fundamental
+ * 2. HPS to find the other note
+ * 3. Subtract that note's harmonics from original, re-detect first
  *
- * For piano-specific improvements:
- * - Use inharmonicity-aware harmonic templates for subtraction
- * - Weight the spectrum to de-emphasize noise floor
- * - Apply onset detection to trigger analysis only on note attacks
+ * Picks whichever pass yields better combined confidence.
+ * The reverse pass helps when a high partial of the lower note
+ * coincides with the upper note's fundamental — forward subtraction
+ * would destroy it, but reverse subtraction preserves it.
  */
 
 import { partialFrequency, getInharmonicityB, midiToKey, freqToMidi, type PianoType } from './inharmonicity.js';
@@ -62,33 +63,111 @@ export class PitchDetector {
   /**
    * Detect up to two pitches from an FFT magnitude spectrum.
    *
+   * Uses bidirectional detection: tries subtracting note1 first, then
+   * alternatively subtracting note2 first, and picks the pair with
+   * better combined confidence. This helps with wide intervals (3:1, 5:1)
+   * where a high partial of the lower note coincides with the upper
+   * note's fundamental — subtracting the lower note first would destroy it.
+   *
    * @param magnitudes - Float32Array of FFT magnitude values (linear, not dB)
    * @returns Array of 0-2 detected notes, sorted low to high
    */
   detect(magnitudes: Float32Array): DetectedNote[] {
-    const spectrum = new Float32Array(magnitudes);
+    const weighted = new Float32Array(magnitudes);
+    this.applyWeighting(weighted);
+
+    // Forward pass: find strongest note, subtract, find second
+    const fwd = this.detectPass(weighted);
+
+    // If forward found 2 notes, try reverse pass for comparison
+    if (fwd.length === 2) {
+      const rev = this.detectPassReverse(weighted);
+      if (rev.length === 2) {
+        const fwdConf = fwd[0].confidence + fwd[1].confidence;
+        const revConf = rev[0].confidence + rev[1].confidence;
+        if (revConf > fwdConf) {
+          return rev;
+        }
+      }
+    }
+
+    return fwd;
+  }
+
+  /**
+   * Forward detection pass: find strongest note first, subtract, find second.
+   */
+  private detectPass(weighted: Float32Array): DetectedNote[] {
+    const spectrum = new Float32Array(weighted);
     const results: DetectedNote[] = [];
 
-    // Apply A-weighting-like curve to reduce low-frequency noise sensitivity
-    this.applyWeighting(spectrum);
-
-    // First note: HPS on full spectrum
     const note1 = this.hpsDetect(spectrum);
     if (!note1) return results;
     results.push(note1);
 
-    // Subtract first note's harmonics
     this.subtractHarmonics(spectrum, note1.frequency);
 
-    // Second note: HPS on residual spectrum
     const note2 = this.hpsDetect(spectrum);
     if (note2 && Math.abs(note2.midi - note1.midi) >= 1) {
       results.push(note2);
     }
 
-    // Sort low to high
     results.sort((a, b) => a.frequency - b.frequency);
     return results;
+  }
+
+  /**
+   * Reverse detection pass: find the second-strongest note by suppressing
+   * a region around the dominant peak, then subtract the second note and
+   * re-detect the first from the original spectrum.
+   *
+   * This catches wide intervals where forward subtraction destroys the
+   * upper note's fundamental.
+   */
+  private detectPassReverse(weighted: Float32Array): DetectedNote[] {
+    // Find dominant note
+    const specA = new Float32Array(weighted);
+    const dominant = this.hpsDetect(specA);
+    if (!dominant) return [];
+
+    // Suppress dominant fundamental region (not full harmonic subtraction)
+    // to find a different note
+    const specB = new Float32Array(weighted);
+    this.suppressFundamental(specB, dominant.frequency);
+
+    const other = this.hpsDetect(specB);
+    if (!other || Math.abs(other.midi - dominant.midi) < 1) return [];
+
+    // Now verify: subtract 'other' from original and re-detect dominant
+    const specC = new Float32Array(weighted);
+    this.subtractHarmonics(specC, other.frequency);
+    const redetected = this.hpsDetect(specC);
+    if (!redetected || Math.abs(redetected.midi - dominant.midi) > 1) return [];
+
+    const results = [
+      { ...redetected }, // use re-detected confidence (from cleaner spectrum)
+      { ...other },
+    ];
+    results.sort((a, b) => a.frequency - b.frequency);
+    return results;
+  }
+
+  /**
+   * Suppress only the fundamental region of a note (not its harmonics).
+   * Used in reverse pass to find a different note without destroying
+   * harmonic relationships.
+   */
+  private suppressFundamental(spectrum: Float32Array, f0: number): void {
+    const centerBin = Math.round(this.freqToBin(f0));
+    // Suppress a ±1 semitone region around the fundamental
+    const width = Math.max(4, Math.round(f0 * 0.06 / this.binResolution));
+    for (let bin = centerBin - width; bin <= centerBin + width; bin++) {
+      if (bin >= 0 && bin < spectrum.length) {
+        const dist = (bin - centerBin) / (width / 2);
+        const factor = Math.exp(-0.5 * dist * dist);
+        spectrum[bin] *= (1 - factor * 0.95);
+      }
+    }
   }
 
   /**
@@ -157,16 +236,23 @@ export class PitchDetector {
   /**
    * Subtract harmonics of a detected pitch from the spectrum.
    * Uses inharmonicity-aware partial frequencies.
+   *
+   * Subtraction strength tapers for higher partials — this preserves
+   * energy at frequencies where another note's fundamental might live
+   * (critical for wide intervals like 3:1, 5:1).
    */
   private subtractHarmonics(spectrum: Float32Array, f0: number): void {
     const midi = Math.round(freqToMidi(f0));
     const key = midiToKey(midi);
     const B = getInharmonicityB(Math.max(1, Math.min(88, key)), this.config.pianoType);
 
-    const maxPartials = 20;
+    const maxPartials = 12;
     for (let n = 1; n <= maxPartials; n++) {
       const partialFreq = partialFrequency(f0, n, B);
       const centerBin = Math.round(this.freqToBin(partialFreq));
+
+      // Taper: full subtraction for partials 1-3, declining after
+      const strength = n <= 3 ? 0.9 : 0.9 * Math.max(0.15, 1 - (n - 3) * 0.1);
 
       // Subtract a window around each partial
       const width = Math.max(3, Math.round(partialFreq * 0.02 / this.binResolution));
@@ -175,7 +261,7 @@ export class PitchDetector {
           // Gaussian-shaped subtraction
           const dist = (bin - centerBin) / (width / 2);
           const factor = Math.exp(-0.5 * dist * dist);
-          spectrum[bin] *= (1 - factor * 0.9);
+          spectrum[bin] *= (1 - factor * strength);
         }
       }
     }
