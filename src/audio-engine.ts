@@ -74,12 +74,6 @@ export class AudioEngine {
   private firstNoteLockedAt: number = 0;
   private readonly noteDebounceMs: number = 300;
 
-  // Residual energy tracking: detect when new energy appears
-  private baselineResidualEnergy: number = 0;
-  private residualEnergyFrames: number = 0;
-  private readonly residualBaselineFrames: number = 10; // frames to establish baseline
-  private readonly residualThresholdFactor: number = 3; // new energy must exceed baseline by 3x
-
   // Second-note confirmation: require consistent detection before locking
   private pendingSecondMidi: number = -1;
   private pendingSecondFrames: number = 0;
@@ -201,8 +195,6 @@ export class AudioEngine {
     this.lockedFilterFreq = null;
     this.framesSinceDetection = Infinity;
     this.firstNoteLockedAt = 0;
-    this.baselineResidualEnergy = 0;
-    this.residualEnergyFrames = 0;
     this.pendingSecondMidi = -1;
     this.pendingSecondFrames = 0;
     this.state.phase = 'idle';
@@ -294,67 +286,43 @@ export class AudioEngine {
       return;
     }
 
-    // Measure residual energy (spectrum after subtracting note 1)
-    const residual = this.detector.residualEnergy(mags, this.firstNote!.frequency);
+    // Try to detect a second note by subtracting the known first note
+    const second = this.detector.detectWithKnown(mags, this.firstNote!.frequency);
 
-    // Build baseline over first N frames — this captures the "noise floor"
-    // of imperfect subtraction when only note 1 is playing
-    if (this.residualEnergyFrames < this.residualBaselineFrames) {
-      // EMA to build baseline
-      const alpha = 1 / (this.residualEnergyFrames + 1);
-      this.baselineResidualEnergy =
-        this.baselineResidualEnergy * (1 - alpha) + residual * alpha;
-      this.residualEnergyFrames++;
+    if (second) {
+      // Require consistent detection across a few frames
+      if (second.midi === this.pendingSecondMidi) {
+        this.pendingSecondFrames++;
+      } else {
+        this.pendingSecondMidi = second.midi;
+        this.pendingSecondFrames = 1;
+      }
 
-      // During baseline period, just show note 1
+      if (this.pendingSecondFrames >= this.requiredConfirmFrames) {
+        // Confirmed — lock the interval
+        this.secondNote = second;
+        this.phase = 'interval';
+        this.framesSinceDetection = 0;
+        this.pendingSecondMidi = -1;
+        this.pendingSecondFrames = 0;
+        this.lockInterval();
+        return;
+      }
+
+      // Still confirming — keep showing first note
       this.framesSinceDetection = 0;
       this.state.notes = [this.firstNote!];
       this.state.intervalLabel = midiToNoteName(this.firstNote!.midi);
       return;
     }
 
-    // Only look for a second note if residual energy exceeds baseline
-    // significantly — means new energy appeared that doesn't belong to note 1
-    const energyRatio = this.baselineResidualEnergy > 0
-      ? residual / this.baselineResidualEnergy
-      : Infinity;
-
-    if (energyRatio > this.residualThresholdFactor) {
-      const second = this.detector.detectWithKnown(mags, this.firstNote!.frequency);
-
-      if (second) {
-        // Require consistent detection across a few frames
-        if (second.midi === this.pendingSecondMidi) {
-          this.pendingSecondFrames++;
-        } else {
-          this.pendingSecondMidi = second.midi;
-          this.pendingSecondFrames = 1;
-        }
-
-        if (this.pendingSecondFrames >= this.requiredConfirmFrames) {
-          // Confirmed — lock the interval
-          this.secondNote = second;
-          this.phase = 'interval';
-          this.framesSinceDetection = 0;
-          this.pendingSecondMidi = -1;
-          this.pendingSecondFrames = 0;
-          this.lockInterval();
-          return;
-        }
-
-        // Still confirming — keep showing first note
-        this.framesSinceDetection = 0;
-        this.state.notes = [this.firstNote!];
-        this.state.intervalLabel = midiToNoteName(this.firstNote!.midi);
-        return;
-      }
-    }
-
-    // No second note / energy too low — reset confirmation
+    // No second note detected — reset confirmation counter
     this.pendingSecondMidi = -1;
     this.pendingSecondFrames = 0;
 
-    // Re-confirm first note is still there
+    // Re-confirm first note is still present (but don't switch to a
+    // different note — detectSingle may pick up a newly played second
+    // note as dominant, which detectWithKnown will catch next frame)
     const recheck = this.detector.detectSingle(mags);
     if (recheck && Math.abs(recheck.midi - this.firstNote!.midi) <= 1) {
       this.firstNote = recheck;
@@ -362,16 +330,11 @@ export class AudioEngine {
       this.state.notes = [this.firstNote];
       this.state.intervalLabel = midiToNoteName(this.firstNote.midi);
     } else if (recheck) {
-      // Different note — switch to it and re-baseline
-      this.firstNote = recheck;
+      // Different note dominant — don't switch; detectWithKnown will
+      // pick it up as the second note on subsequent frames.
       this.framesSinceDetection = 0;
-      this.firstNoteLockedAt = performance.now();
-      this.baselineResidualEnergy = 0;
-      this.residualEnergyFrames = 0;
-      this.pendingSecondMidi = -1;
-      this.pendingSecondFrames = 0;
-      this.state.notes = [this.firstNote];
-      this.state.intervalLabel = midiToNoteName(this.firstNote.midi);
+      this.state.notes = [this.firstNote!];
+      this.state.intervalLabel = midiToNoteName(this.firstNote!.midi);
     } else {
       this.framesSinceDetection++;
       if (this.framesSinceDetection > this.holdFrames) {
