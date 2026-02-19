@@ -74,6 +74,48 @@ export function initUI(): void {
     holdTimeValue.textContent = `${frames} frames`;
   });
 
+  // Detection tuning sliders
+  const debounceSlider = document.getElementById('debounce') as HTMLInputElement;
+  const debounceValue = document.getElementById('debounce-value') as HTMLSpanElement;
+  const confirmSlider = document.getElementById('confirm-frames') as HTMLInputElement;
+  const confirmValue = document.getElementById('confirm-frames-value') as HTMLSpanElement;
+  const secondConfSlider = document.getElementById('second-confidence') as HTMLInputElement;
+  const secondConfValue = document.getElementById('second-confidence-value') as HTMLSpanElement;
+  const subtractionSlider = document.getElementById('subtraction') as HTMLInputElement;
+  const subtractionValue = document.getElementById('subtraction-value') as HTMLSpanElement;
+  const harmonicRejectSlider = document.getElementById('harmonic-reject') as HTMLInputElement;
+  const harmonicRejectValue = document.getElementById('harmonic-reject-value') as HTMLSpanElement;
+
+  debounceSlider.addEventListener('input', () => {
+    const ms = parseInt(debounceSlider.value);
+    engine.setDebounceMs(ms);
+    debounceValue.textContent = `${ms}`;
+  });
+
+  confirmSlider.addEventListener('input', () => {
+    const frames = parseInt(confirmSlider.value);
+    engine.setConfirmFrames(frames);
+    confirmValue.textContent = `${frames}`;
+  });
+
+  secondConfSlider.addEventListener('input', () => {
+    const val = parseFloat(secondConfSlider.value);
+    engine.setSecondNoteConfidence(val);
+    secondConfValue.textContent = val.toFixed(2);
+  });
+
+  subtractionSlider.addEventListener('input', () => {
+    const val = parseFloat(subtractionSlider.value);
+    engine.setSubtractionStrength(val);
+    subtractionValue.textContent = val.toFixed(2);
+  });
+
+  harmonicRejectSlider.addEventListener('input', () => {
+    const cents = parseInt(harmonicRejectSlider.value);
+    engine.setHarmonicRejectCents(cents);
+    harmonicRejectValue.textContent = `${cents}`;
+  });
+
   // State updates
   engine.setStateCallback((state: AudioEngineState) => {
     // Level meter

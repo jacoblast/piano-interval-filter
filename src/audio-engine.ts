@@ -72,12 +72,12 @@ export class AudioEngine {
 
   // Debounce: minimum time after first note before detecting second
   private firstNoteLockedAt: number = 0;
-  private readonly noteDebounceMs: number = 300;
+  private noteDebounceMs: number = 300;
 
   // Second-note confirmation: require consistent detection before locking
   private pendingSecondMidi: number = -1;
   private pendingSecondFrames: number = 0;
-  private readonly requiredConfirmFrames: number = 3;
+  private requiredConfirmFrames: number = 3;
 
   // State
   private state: AudioEngineState = {
@@ -121,6 +121,26 @@ export class AudioEngine {
 
   setHoldTime(frames: number): void {
     this.holdFrames = frames;
+  }
+
+  setDebounceMs(ms: number): void {
+    this.noteDebounceMs = ms;
+  }
+
+  setConfirmFrames(frames: number): void {
+    this.requiredConfirmFrames = frames;
+  }
+
+  setSecondNoteConfidence(val: number): void {
+    this.detector.updateConfig({ secondNoteMinConfidence: val });
+  }
+
+  setSubtractionStrength(val: number): void {
+    this.detector.updateConfig({ subtractionStrength: val });
+  }
+
+  setHarmonicRejectCents(cents: number): void {
+    this.detector.updateConfig({ harmonicRejectCents: cents });
   }
 
   async start(): Promise<void> {

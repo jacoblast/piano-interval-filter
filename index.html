@@ -214,6 +214,46 @@
       font-size: 0.8rem;
       margin-top: 1rem;
     }
+
+    details.tuning {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 0.8rem 1rem;
+      margin-bottom: 1rem;
+    }
+    details.tuning summary {
+      cursor: pointer;
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #888;
+    }
+    .tuning-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.6rem 1.2rem;
+      margin-top: 0.8rem;
+      font-size: 0.8rem;
+    }
+    .tuning-grid label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+    .tuning-grid .slider-row {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .tuning-grid input[type="range"] {
+      flex: 1;
+    }
+    .tuning-grid .val {
+      min-width: 3.5em;
+      text-align: right;
+      color: #a8dadc;
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
@@ -264,6 +304,47 @@
       <span>-10 dB</span>
     </div>
   </div>
+
+  <details class="tuning" open>
+    <summary>Detection Tuning</summary>
+    <div class="tuning-grid">
+      <label>
+        Debounce (ms)
+        <div class="slider-row">
+          <input type="range" id="debounce" min="0" max="1000" value="300" step="50" />
+          <span class="val" id="debounce-value">300</span>
+        </div>
+      </label>
+      <label>
+        Confirm frames
+        <div class="slider-row">
+          <input type="range" id="confirm-frames" min="1" max="15" value="3" step="1" />
+          <span class="val" id="confirm-frames-value">3</span>
+        </div>
+      </label>
+      <label>
+        2nd note confidence
+        <div class="slider-row">
+          <input type="range" id="second-confidence" min="0.05" max="0.50" value="0.15" step="0.01" />
+          <span class="val" id="second-confidence-value">0.15</span>
+        </div>
+      </label>
+      <label>
+        Subtraction strength
+        <div class="slider-row">
+          <input type="range" id="subtraction" min="0.50" max="1.00" value="0.92" step="0.01" />
+          <span class="val" id="subtraction-value">0.92</span>
+        </div>
+      </label>
+      <label>
+        Harmonic reject (cents)
+        <div class="slider-row">
+          <input type="range" id="harmonic-reject" min="0" max="100" value="40" step="5" />
+          <span class="val" id="harmonic-reject-value">40</span>
+        </div>
+      </label>
+    </div>
+  </details>
 
   <div class="display-panel">
     <h2>Detected Notes</h2>

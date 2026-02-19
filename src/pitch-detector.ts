@@ -25,6 +25,9 @@ export interface PitchDetectorConfig {
   minMidi: number;  // lowest note to detect (default: 21 = A0)
   maxMidi: number;  // highest note to detect (default: 108 = C8)
   hpsOrder: number; // number of HPS downsampling stages (default: 5)
+  secondNoteMinConfidence: number; // min confidence for detectWithKnown (default: 0.15)
+  subtractionStrength: number;     // harmonic subtraction factor 0-1 (default: 0.92)
+  harmonicRejectCents: number;     // reject 2nd note within N cents of any partial (default: 40)
 }
 
 const DEFAULT_CONFIG: PitchDetectorConfig = {
@@ -34,6 +37,9 @@ const DEFAULT_CONFIG: PitchDetectorConfig = {
   minMidi: 21,
   maxMidi: 108,
   hpsOrder: 5,
+  secondNoteMinConfidence: 0.15,
+  subtractionStrength: 0.92,
+  harmonicRejectCents: 40,
 };
 
 export class PitchDetector {
@@ -76,9 +82,16 @@ export class PitchDetector {
     const note = this.hpsDetect(spectrum);
     if (!note) return null;
 
+    // Require higher confidence than general detection
+    if (note.confidence < this.config.secondNoteMinConfidence) return null;
+
     // Reject if it's the same note as the known one
     const knownMidi = Math.round(freqToMidi(knownFreq));
     if (Math.abs(note.midi - knownMidi) < 1) return null;
+
+    // Reject if the candidate is close to any partial of the known note.
+    // A rising partial of note 1 should not be mistaken for a new note.
+    if (this.isNearHarmonic(note.frequency, knownFreq)) return null;
 
     return note;
   }
@@ -147,14 +160,36 @@ export class PitchDetector {
   }
 
   /**
+   * Check if a frequency is within harmonicRejectCents of any partial
+   * of a known fundamental. Used to reject false second-note detections
+   * caused by fluctuating partials of the first note.
+   */
+  private isNearHarmonic(candidateFreq: number, knownFreq: number): boolean {
+    const { harmonicRejectCents, pianoType } = this.config;
+    if (harmonicRejectCents <= 0) return false;
+
+    const midi = Math.round(freqToMidi(knownFreq));
+    const key = midiToKey(midi);
+    const B = getInharmonicityB(Math.max(1, Math.min(88, key)), pianoType);
+
+    const maxPartials = 16;
+    for (let n = 2; n <= maxPartials; n++) { // start at 2; partial 1 = fundamental already rejected
+      const partialFreq = partialFrequency(knownFreq, n, B);
+      const cents = Math.abs(1200 * Math.log2(candidateFreq / partialFreq));
+      if (cents < harmonicRejectCents) return true;
+    }
+    return false;
+  }
+
+  /**
    * Subtract harmonics of a known pitch from the spectrum.
    * Uses inharmonicity-aware partial frequencies.
-   * Full-strength subtraction since we're confident about this note.
    */
   private subtractHarmonics(spectrum: Float32Array, f0: number): void {
     const midi = Math.round(freqToMidi(f0));
     const key = midiToKey(midi);
     const B = getInharmonicityB(Math.max(1, Math.min(88, key)), this.config.pianoType);
+    const strength = this.config.subtractionStrength;
 
     const maxPartials = 16;
     for (let n = 1; n <= maxPartials; n++) {
@@ -166,7 +201,7 @@ export class PitchDetector {
         if (bin >= 0 && bin < spectrum.length) {
           const dist = (bin - centerBin) / (width / 2);
           const factor = Math.exp(-0.5 * dist * dist);
-          spectrum[bin] *= (1 - factor * 0.92);
+          spectrum[bin] *= (1 - factor * strength);
         }
       }
     }
