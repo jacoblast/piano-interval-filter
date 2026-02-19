@@ -84,6 +84,25 @@ export class PitchDetector {
   }
 
   /**
+   * Measure the energy remaining in the spectrum after subtracting a known note.
+   * Used to detect when new energy appears (a second note is played).
+   */
+  residualEnergy(magnitudes: Float32Array, knownFreq: number): number {
+    const spectrum = new Float32Array(magnitudes);
+    this.applyWeighting(spectrum);
+    this.subtractHarmonics(spectrum, knownFreq);
+
+    // Sum of squares in the piano range
+    const minBin = Math.max(1, Math.floor(this.freqToBin(this.midiToFreq(this.config.minMidi))));
+    const maxBin = Math.min(spectrum.length, Math.ceil(this.freqToBin(this.midiToFreq(this.config.maxMidi))));
+    let energy = 0;
+    for (let i = minBin; i < maxBin; i++) {
+      energy += spectrum[i] * spectrum[i];
+    }
+    return energy;
+  }
+
+  /**
    * Harmonic Product Spectrum pitch detection.
    *
    * Multiplies the spectrum with downsampled versions of itself.
