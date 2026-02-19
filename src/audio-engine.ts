@@ -89,7 +89,7 @@ export class AudioEngine {
       },
     });
 
-    this.ctx = new AudioContext({ sampleRate: 48000 });
+    this.ctx = new AudioContext();
     const sampleRate = this.ctx.sampleRate;
 
     this.detector.updateConfig({ sampleRate, fftSize: 8192 });
