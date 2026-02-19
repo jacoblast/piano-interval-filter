@@ -85,6 +85,21 @@ export function initUI(): void {
       ? `${state.peakDb.toFixed(0)} dB`
       : '— dB';
 
+    // Status indicator shows detection phase
+    if (state.isRunning) {
+      const phaseLabels = {
+        idle: 'Listening — play a note...',
+        single: 'Note locked — play the second note...',
+        interval: 'Interval detected',
+      };
+      statusIndicator.textContent = phaseLabels[state.phase];
+      statusIndicator.className = state.phase === 'interval'
+        ? 'status active'
+        : state.phase === 'single'
+          ? 'status single'
+          : 'status active';
+    }
+
     // Notes
     if (state.notes.length === 0) {
       notesDisplay.textContent = '—';

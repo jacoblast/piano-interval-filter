@@ -2,12 +2,20 @@
  * Audio engine: manages mic input, FFT analysis, and bandpass filter output.
  *
  * Signal chain:
- *   Mic -> AnalyserNode (for FFT) -> gain (dry, muted by default)
- *                                 \-> BiquadFilter (bandpass) -> gain (wet) -> destination
+ *   Mic -> AnalyserNode (for FFT)
+ *       \-> BiquadFilter (bandpass) -> wetGain -> destination
  *
- * The analyser feeds FFT data to the pitch detector.
- * When coincident partials are found, the bandpass filter is set to
- * isolate them, and the wet gain fades in.
+ * Detection state machine (sequential two-note workflow):
+ *   idle → single → interval
+ *
+ *   idle:     nothing detected, waiting for first note
+ *   single:   first note locked (detected in isolation), waiting for second
+ *   interval: both notes locked, showing coincident partials
+ *
+ * Transitions:
+ *   idle → single:     detectSingle finds a note above threshold
+ *   single → interval: detectWithKnown finds a second note
+ *   any → idle:        signal below threshold for holdFrames
  */
 
 import { PitchDetector, type DetectedNote } from './pitch-detector.js';
@@ -22,14 +30,17 @@ import {
   type PianoType,
 } from './inharmonicity.js';
 
+type DetectionPhase = 'idle' | 'single' | 'interval';
+
 export interface AudioEngineState {
   isRunning: boolean;
+  phase: DetectionPhase;
   notes: DetectedNote[];
   coincidentPartials: CoincidentPartial[];
   activeFilterFreq: number | null;
   activeFilterQ: number;
   intervalLabel: string;
-  peakDb: number; // current peak dB level (for metering)
+  peakDb: number;
   thresholdDb: number;
   gateOpen: boolean;
 }
@@ -49,20 +60,20 @@ export class AudioEngine {
   private pianoType: PianoType = 'grand';
   private filterQ: number = 30;
   private thresholdDb: number = -50;
-  private holdFrames: number = 20; // ~333ms at 60fps
+  private holdFrames: number = 20;
 
-  // Smoothing state
-  private lockedNotes: DetectedNote[] = [];
-  private lockedInterval: string = '';
+  // Sequential detection state
+  private phase: DetectionPhase = 'idle';
+  private firstNote: DetectedNote | null = null;
+  private secondNote: DetectedNote | null = null;
   private lockedPartials: CoincidentPartial[] = [];
   private lockedFilterFreq: number | null = null;
-  private framesSinceGoodDetection: number = Infinity;
-  private consecutiveNewInterval: number = 0;
-  private pendingInterval: string = '';
+  private framesSinceDetection: number = Infinity;
 
   // State
   private state: AudioEngineState = {
     isRunning: false,
+    phase: 'idle',
     notes: [],
     coincidentPartials: [],
     activeFilterFreq: null,
@@ -106,7 +117,6 @@ export class AudioEngine {
   async start(): Promise<void> {
     if (this.ctx) return;
 
-    // Request microphone
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: false,
@@ -120,38 +130,29 @@ export class AudioEngine {
 
     this.detector.updateConfig({ sampleRate, fftSize: 8192 });
 
-    // Source
     this.source = this.ctx.createMediaStreamSource(stream);
 
-    // Analyser for FFT
     this.analyser = this.ctx.createAnalyser();
     this.analyser.fftSize = 8192;
     this.analyser.smoothingTimeConstant = 0.3;
 
-    // Bandpass filter
     this.bandpass = this.ctx.createBiquadFilter();
     this.bandpass.type = 'bandpass';
     this.bandpass.frequency.value = 440;
     this.bandpass.Q.value = this.filterQ;
 
-    // Wet gain (starts silent, fades in when filter is set)
     this.wetGain = this.ctx.createGain();
     this.wetGain.gain.value = 0;
 
-    // Connect: source -> analyser (no output to speakers — avoids feedback)
-    // source -> bandpass -> wetGain -> destination (headphone output)
     this.source.connect(this.analyser);
     this.source.connect(this.bandpass);
     this.bandpass.connect(this.wetGain);
     this.wetGain.connect(this.ctx.destination);
 
-    // Allocate magnitude buffer
     this.magnitudes = new Float32Array(this.analyser.frequencyBinCount);
 
     this.state.isRunning = true;
     this.emitState();
-
-    // Start analysis loop
     this.analyze();
   }
 
@@ -169,31 +170,38 @@ export class AudioEngine {
       this.ctx.close();
       this.ctx = null;
     }
+    this.resetDetection();
     this.state.isRunning = false;
-    this.state.notes = [];
-    this.state.coincidentPartials = [];
-    this.state.activeFilterFreq = null;
-    this.state.intervalLabel = '';
     this.state.peakDb = -Infinity;
     this.state.gateOpen = false;
-    this.lockedNotes = [];
-    this.lockedInterval = '';
-    this.lockedPartials = [];
-    this.lockedFilterFreq = null;
-    this.framesSinceGoodDetection = Infinity;
-    this.consecutiveNewInterval = 0;
-    this.pendingInterval = '';
     this.emitState();
   }
 
+  /** Reset detection state machine to idle */
+  private resetDetection(): void {
+    this.phase = 'idle';
+    this.firstNote = null;
+    this.secondNote = null;
+    this.lockedPartials = [];
+    this.lockedFilterFreq = null;
+    this.framesSinceDetection = Infinity;
+    this.state.phase = 'idle';
+    this.state.notes = [];
+    this.state.coincidentPartials = [];
+    this.state.intervalLabel = '';
+    this.clearFilter();
+  }
+
   /**
-   * Main analysis loop — runs on requestAnimationFrame (~60fps).
-   * Pitch detection and filter updates happen here.
+   * Main analysis loop.
    *
-   * Threshold gate: if peak dB is below threshold, skip detection.
-   * Smoothing: lock detected interval and hold it through transient dropouts.
-   * Only change when a new interval is consistent for several frames,
-   * or when signal drops below threshold.
+   * State machine:
+   *   idle:     run detectSingle → if found, lock as first note, go to 'single'
+   *   single:   run detectWithKnown → if found, lock interval, go to 'interval'
+   *             also re-confirm first note is still present via detectSingle
+   *   interval: hold the result; re-confirm periodically
+   *
+   * Any state: if signal below threshold for holdFrames → reset to idle.
    */
   private analyze = (): void => {
     if (!this.analyser || !this.magnitudes || !this.ctx) return;
@@ -201,7 +209,7 @@ export class AudioEngine {
     const dBData = new Float32Array(this.analyser.frequencyBinCount);
     this.analyser.getFloatFrequencyData(dBData);
 
-    // Compute peak dB for metering and gating
+    // Peak dB for metering/gating
     let peakDb = -Infinity;
     for (let i = 0; i < dBData.length; i++) {
       if (dBData[i] > peakDb) peakDb = dBData[i];
@@ -212,131 +220,124 @@ export class AudioEngine {
     this.state.gateOpen = gateOpen;
 
     if (!gateOpen) {
-      // Signal below threshold — clear everything after hold expires
-      this.framesSinceGoodDetection++;
-      if (this.framesSinceGoodDetection > this.holdFrames) {
-        this.lockedNotes = [];
-        this.lockedInterval = '';
-        this.lockedPartials = [];
-        this.lockedFilterFreq = null;
-        this.consecutiveNewInterval = 0;
-        this.pendingInterval = '';
-        this.state.notes = [];
-        this.state.coincidentPartials = [];
-        this.state.intervalLabel = '';
-        this.clearFilter();
-      } else {
-        // Still within hold period — show locked state
-        this.state.notes = this.lockedNotes;
-        this.state.coincidentPartials = this.lockedPartials;
-        this.state.intervalLabel = this.lockedInterval;
-        if (this.lockedFilterFreq !== null) {
-          this.setFilter(this.lockedFilterFreq);
-        }
+      this.framesSinceDetection++;
+      if (this.framesSinceDetection > this.holdFrames) {
+        this.resetDetection();
       }
+      // else: hold current state (keep showing whatever we had)
       this.emitState();
       this.animFrameId = requestAnimationFrame(this.analyze);
       return;
     }
 
-    // Gate is open — convert dB to linear and detect
+    // Convert dB to linear magnitude
     for (let i = 0; i < dBData.length; i++) {
       this.magnitudes[i] = Math.pow(10, dBData[i] / 20);
     }
 
-    const notes = this.detector.detect(this.magnitudes);
-
-    if (notes.length === 2) {
-      const [low, high] = notes;
-      const semitones = Math.round(high.midi - low.midi);
-      const currentInterval =
-        `${midiToNoteName(low.midi)} - ${midiToNoteName(high.midi)} (${intervalName(semitones)})`;
-
-      // Smoothing: check if this matches the pending new interval
-      if (currentInterval === this.lockedInterval) {
-        // Same as locked — reinforce lock
-        this.framesSinceGoodDetection = 0;
-        this.consecutiveNewInterval = 0;
-        this.pendingInterval = '';
-      } else if (currentInterval === this.pendingInterval) {
-        // Same as pending — increment consistency counter
-        this.consecutiveNewInterval++;
-      } else {
-        // New interval — start tracking
-        this.pendingInterval = currentInterval;
-        this.consecutiveNewInterval = 1;
-      }
-
-      // Accept new interval after enough consistent frames (or if nothing locked)
-      const requiredFrames = this.lockedInterval ? 4 : 1;
-      if (this.consecutiveNewInterval >= requiredFrames || !this.lockedInterval) {
-        // Lock in the new detection
-        this.lockedNotes = notes;
-        this.lockedInterval = currentInterval;
-        this.framesSinceGoodDetection = 0;
-        this.consecutiveNewInterval = 0;
-        this.pendingInterval = '';
-
-        // Compute coincident partials for locked notes
-        const key1 = midiToKey(low.midi);
-        const key2 = midiToKey(high.midi);
-        const B1 = getInharmonicityB(Math.max(1, Math.min(88, key1)), this.pianoType);
-        const B2 = getInharmonicityB(Math.max(1, Math.min(88, key2)), this.pianoType);
-        this.lockedPartials = findCoincidentPartials(
-          midiToFreq(low.midi), midiToFreq(high.midi),
-          B1, B2, 8, 80
-        );
-        this.lockedFilterFreq = this.lockedPartials.length > 0
-          ? this.lockedPartials[0].centerFreq
-          : null;
-      }
-
-      // Show locked state (stable)
-      this.state.notes = this.lockedNotes;
-      this.state.coincidentPartials = this.lockedPartials;
-      this.state.intervalLabel = this.lockedInterval;
-      if (this.lockedFilterFreq !== null) {
-        this.setFilter(this.lockedFilterFreq);
-      } else {
-        this.clearFilter();
-      }
-    } else if (this.lockedInterval) {
-      // Fewer than 2 notes but we have a locked result — hold it
-      this.framesSinceGoodDetection++;
-      if (this.framesSinceGoodDetection > this.holdFrames) {
-        // Hold expired
-        this.lockedNotes = [];
-        this.lockedInterval = '';
-        this.lockedPartials = [];
-        this.lockedFilterFreq = null;
-        this.state.notes = notes; // show whatever we have (0 or 1 note)
-        this.state.coincidentPartials = [];
-        this.state.intervalLabel = notes.length === 1
-          ? midiToNoteName(notes[0].midi)
-          : '';
-        this.clearFilter();
-      } else {
-        // Still holding
-        this.state.notes = this.lockedNotes;
-        this.state.coincidentPartials = this.lockedPartials;
-        this.state.intervalLabel = this.lockedInterval;
-        if (this.lockedFilterFreq !== null) {
-          this.setFilter(this.lockedFilterFreq);
-        }
-      }
+    if (this.phase === 'idle') {
+      this.analyzeIdle();
+    } else if (this.phase === 'single') {
+      this.analyzeSingle();
     } else {
-      // No locked result, fewer than 2 notes
-      this.state.notes = notes;
-      this.state.coincidentPartials = [];
-      this.state.intervalLabel = notes.length === 1
-        ? midiToNoteName(notes[0].midi)
-        : '';
-      this.clearFilter();
+      this.analyzeInterval();
     }
 
     this.emitState();
     this.animFrameId = requestAnimationFrame(this.analyze);
   };
+
+  /** idle: look for a single note */
+  private analyzeIdle(): void {
+    const note = this.detector.detectSingle(this.magnitudes!);
+    if (note) {
+      this.firstNote = note;
+      this.phase = 'single';
+      this.framesSinceDetection = 0;
+      this.state.phase = 'single';
+      this.state.notes = [note];
+      this.state.intervalLabel = midiToNoteName(note.midi);
+    }
+  }
+
+  /** single: first note locked, look for second */
+  private analyzeSingle(): void {
+    const mags = this.magnitudes!;
+
+    // Try to find a second note by subtracting the known first
+    const second = this.detector.detectWithKnown(mags, this.firstNote!.frequency);
+
+    if (second) {
+      // Found an interval — lock it
+      this.secondNote = second;
+      this.phase = 'interval';
+      this.framesSinceDetection = 0;
+      this.lockInterval();
+      return;
+    }
+
+    // No second note yet — re-confirm first note is still there
+    const recheck = this.detector.detectSingle(mags);
+    if (recheck && Math.abs(recheck.midi - this.firstNote!.midi) <= 1) {
+      // Same note still present
+      this.firstNote = recheck;
+      this.framesSinceDetection = 0;
+      this.state.notes = [this.firstNote];
+      this.state.intervalLabel = midiToNoteName(this.firstNote.midi);
+    } else if (recheck) {
+      // Different note — switch to it
+      this.firstNote = recheck;
+      this.framesSinceDetection = 0;
+      this.state.notes = [this.firstNote];
+      this.state.intervalLabel = midiToNoteName(this.firstNote.midi);
+    } else {
+      // Lost the note
+      this.framesSinceDetection++;
+      if (this.framesSinceDetection > this.holdFrames) {
+        this.resetDetection();
+      }
+    }
+  }
+
+  /** interval: both notes locked, hold and display */
+  private analyzeInterval(): void {
+    // The interval is locked — just hold it.
+    // The threshold gate + hold timer handles cleanup.
+    this.framesSinceDetection = 0;
+
+    // Optionally: re-confirm the interval is still present.
+    // For now, we trust the lock and let the gate clear it when notes decay.
+  }
+
+  /** Compute and store coincident partials for the locked note pair */
+  private lockInterval(): void {
+    const notes = [this.firstNote!, this.secondNote!].sort((a, b) => a.frequency - b.frequency);
+    const [low, high] = notes;
+    const semitones = Math.round(high.midi - low.midi);
+
+    const key1 = midiToKey(low.midi);
+    const key2 = midiToKey(high.midi);
+    const B1 = getInharmonicityB(Math.max(1, Math.min(88, key1)), this.pianoType);
+    const B2 = getInharmonicityB(Math.max(1, Math.min(88, key2)), this.pianoType);
+
+    this.lockedPartials = findCoincidentPartials(
+      midiToFreq(low.midi), midiToFreq(high.midi),
+      B1, B2, 8, 80
+    );
+    this.lockedFilterFreq = this.lockedPartials.length > 0
+      ? this.lockedPartials[0].centerFreq
+      : null;
+
+    this.state.phase = 'interval';
+    this.state.notes = notes;
+    this.state.coincidentPartials = this.lockedPartials;
+    this.state.intervalLabel =
+      `${midiToNoteName(low.midi)} - ${midiToNoteName(high.midi)} (${intervalName(semitones)})`;
+
+    if (this.lockedFilterFreq !== null) {
+      this.setFilter(this.lockedFilterFreq);
+    }
+  }
 
   /** Set the bandpass filter to a specific frequency and fade in */
   private setFilter(freq: number): void {
