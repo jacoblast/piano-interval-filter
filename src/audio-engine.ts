@@ -70,6 +70,11 @@ export class AudioEngine {
   private lockedFilterFreq: number | null = null;
   private framesSinceDetection: number = Infinity;
 
+  // Second-note confirmation: require consistent detection before locking
+  private pendingSecondMidi: number = -1;
+  private pendingSecondFrames: number = 0;
+  private readonly requiredConfirmFrames: number = 5;
+
   // State
   private state: AudioEngineState = {
     isRunning: false,
@@ -185,6 +190,8 @@ export class AudioEngine {
     this.lockedPartials = [];
     this.lockedFilterFreq = null;
     this.framesSinceDetection = Infinity;
+    this.pendingSecondMidi = -1;
+    this.pendingSecondFrames = 0;
     this.state.phase = 'idle';
     this.state.notes = [];
     this.state.coincidentPartials = [];
@@ -268,15 +275,38 @@ export class AudioEngine {
     const second = this.detector.detectWithKnown(mags, this.firstNote!.frequency);
 
     if (second) {
-      // Found an interval — lock it
-      this.secondNote = second;
-      this.phase = 'interval';
+      // Require consistent detection across multiple frames to avoid
+      // locking on spectral artifacts from imperfect subtraction
+      if (second.midi === this.pendingSecondMidi) {
+        this.pendingSecondFrames++;
+      } else {
+        this.pendingSecondMidi = second.midi;
+        this.pendingSecondFrames = 1;
+      }
+
+      if (this.pendingSecondFrames >= this.requiredConfirmFrames) {
+        // Confirmed — lock the interval
+        this.secondNote = second;
+        this.phase = 'interval';
+        this.framesSinceDetection = 0;
+        this.pendingSecondMidi = -1;
+        this.pendingSecondFrames = 0;
+        this.lockInterval();
+        return;
+      }
+
+      // Still confirming — keep showing first note
       this.framesSinceDetection = 0;
-      this.lockInterval();
+      this.state.notes = [this.firstNote!];
+      this.state.intervalLabel = midiToNoteName(this.firstNote!.midi);
       return;
     }
 
-    // No second note yet — re-confirm first note is still there
+    // No second note detected — reset confirmation counter
+    this.pendingSecondMidi = -1;
+    this.pendingSecondFrames = 0;
+
+    // Re-confirm first note is still there
     const recheck = this.detector.detectSingle(mags);
     if (recheck && Math.abs(recheck.midi - this.firstNote!.midi) <= 1) {
       // Same note still present
@@ -288,6 +318,8 @@ export class AudioEngine {
       // Different note — switch to it
       this.firstNote = recheck;
       this.framesSinceDetection = 0;
+      this.pendingSecondMidi = -1;
+      this.pendingSecondFrames = 0;
       this.state.notes = [this.firstNote];
       this.state.intervalLabel = midiToNoteName(this.firstNote.midi);
     } else {
