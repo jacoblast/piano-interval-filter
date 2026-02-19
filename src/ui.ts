@@ -116,6 +116,24 @@ export function initUI(): void {
     harmonicRejectValue.textContent = `${cents}`;
   });
 
+  const onsetThreshSlider = document.getElementById('onset-threshold') as HTMLInputElement;
+  const onsetThreshValue = document.getElementById('onset-threshold-value') as HTMLSpanElement;
+  const onsetWindowSlider = document.getElementById('onset-window') as HTMLInputElement;
+  const onsetWindowValue = document.getElementById('onset-window-value') as HTMLSpanElement;
+  const fluxDisplay = document.getElementById('flux-display') as HTMLElement;
+
+  onsetThreshSlider.addEventListener('input', () => {
+    const val = parseFloat(onsetThreshSlider.value);
+    engine.setOnsetThreshold(val);
+    onsetThreshValue.textContent = val.toFixed(1);
+  });
+
+  onsetWindowSlider.addEventListener('input', () => {
+    const frames = parseInt(onsetWindowSlider.value);
+    engine.setOnsetSearchWindow(frames);
+    onsetWindowValue.textContent = `${frames}`;
+  });
+
   // State updates
   engine.setStateCallback((state: AudioEngineState) => {
     // Level meter
@@ -126,6 +144,12 @@ export function initUI(): void {
     levelDb.textContent = state.peakDb > -Infinity
       ? `${state.peakDb.toFixed(0)} dB`
       : '— dB';
+
+    // Spectral flux display
+    fluxDisplay.textContent =
+      `Flux: ${state.spectralFlux.toFixed(1)} | Baseline: ${state.fluxBaseline.toFixed(1)} | ` +
+      `Onset: ${state.onsetActive ? 'ACTIVE' : 'waiting'}`;
+    fluxDisplay.style.color = state.onsetActive ? '#95d5b2' : '#666';
 
     // Status indicator shows detection phase
     if (state.isRunning) {

@@ -43,6 +43,9 @@ export interface AudioEngineState {
   peakDb: number;
   thresholdDb: number;
   gateOpen: boolean;
+  spectralFlux: number;     // current frame's flux value
+  fluxBaseline: number;     // running average flux
+  onsetActive: boolean;     // true when search window is open
 }
 
 export type StateCallback = (state: AudioEngineState) => void;
@@ -79,6 +82,13 @@ export class AudioEngine {
   private pendingSecondFrames: number = 0;
   private requiredConfirmFrames: number = 3;
 
+  // Spectral flux onset detection
+  private prevMagnitudes: Float32Array | null = null;
+  private fluxBaseline: number = 0;        // EMA of spectral flux
+  private onsetSearchFrames: number = 0;   // frames remaining in search window
+  private onsetThreshold: number = 3.0;    // flux must exceed baseline * this factor
+  private onsetSearchWindow: number = 15;  // frames to search after onset detected
+
   // State
   private state: AudioEngineState = {
     isRunning: false,
@@ -91,6 +101,9 @@ export class AudioEngine {
     peakDb: -Infinity,
     thresholdDb: -50,
     gateOpen: false,
+    spectralFlux: 0,
+    fluxBaseline: 0,
+    onsetActive: false,
   };
 
   constructor() {
@@ -141,6 +154,14 @@ export class AudioEngine {
 
   setHarmonicRejectCents(cents: number): void {
     this.detector.updateConfig({ harmonicRejectCents: cents });
+  }
+
+  setOnsetThreshold(val: number): void {
+    this.onsetThreshold = val;
+  }
+
+  setOnsetSearchWindow(frames: number): void {
+    this.onsetSearchWindow = frames;
   }
 
   async start(): Promise<void> {
@@ -217,6 +238,8 @@ export class AudioEngine {
     this.firstNoteLockedAt = 0;
     this.pendingSecondMidi = -1;
     this.pendingSecondFrames = 0;
+    this.fluxBaseline = 0;
+    this.onsetSearchFrames = 0;
     this.state.phase = 'idle';
     this.state.notes = [];
     this.state.coincidentPartials = [];
@@ -267,6 +290,29 @@ export class AudioEngine {
       this.magnitudes[i] = Math.pow(10, dBData[i] / 20);
     }
 
+    // Compute spectral flux (half-wave rectified — only energy increases)
+    let flux = 0;
+    if (this.prevMagnitudes) {
+      for (let i = 0; i < this.magnitudes.length; i++) {
+        const diff = this.magnitudes[i] - this.prevMagnitudes[i];
+        if (diff > 0) flux += diff;
+      }
+    }
+    // Store current frame for next comparison
+    if (!this.prevMagnitudes) {
+      this.prevMagnitudes = new Float32Array(this.magnitudes.length);
+    }
+    this.prevMagnitudes.set(this.magnitudes);
+
+    // Update flux baseline (EMA with slow decay)
+    const fluxAlpha = 0.05;
+    this.fluxBaseline = this.fluxBaseline * (1 - fluxAlpha) + flux * fluxAlpha;
+
+    // Expose flux values for UI
+    this.state.spectralFlux = flux;
+    this.state.fluxBaseline = this.fluxBaseline;
+    this.state.onsetActive = this.onsetSearchFrames > 0;
+
     if (this.phase === 'idle') {
       this.analyzeIdle();
     } else if (this.phase === 'single') {
@@ -306,7 +352,37 @@ export class AudioEngine {
       return;
     }
 
-    // Try to detect a second note by subtracting the known first note
+    // Onset gating: only search for second note after a spectral flux spike.
+    // A new hammer strike creates broadband energy; gradual partial drift doesn't.
+    if (this.onsetSearchFrames > 0) {
+      this.onsetSearchFrames--;
+    } else if (this.fluxBaseline > 0 &&
+               this.state.spectralFlux > this.fluxBaseline * this.onsetThreshold) {
+      // Onset detected — open search window
+      this.onsetSearchFrames = this.onsetSearchWindow;
+    }
+
+    // Only attempt second-note detection during an active search window
+    if (this.onsetSearchFrames <= 0) {
+      // No onset — just maintain first note
+      this.framesSinceDetection = 0;
+      this.state.notes = [this.firstNote!];
+      this.state.intervalLabel = midiToNoteName(this.firstNote!.midi);
+
+      // Still re-confirm first note for hold timer
+      const recheck = this.detector.detectSingle(mags);
+      if (recheck && Math.abs(recheck.midi - this.firstNote!.midi) <= 1) {
+        this.firstNote = recheck;
+      } else if (!recheck) {
+        this.framesSinceDetection++;
+        if (this.framesSinceDetection > this.holdFrames) {
+          this.resetDetection();
+        }
+      }
+      return;
+    }
+
+    // Search window is open — try to detect a second note
     const second = this.detector.detectWithKnown(mags, this.firstNote!.frequency);
 
     if (second) {
