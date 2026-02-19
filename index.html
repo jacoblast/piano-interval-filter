@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Piano Interval Filter</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#1a1a2e" />
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100vh;
+      padding: 1rem;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 0.5rem;
+      font-size: 1.4rem;
+      color: #e0e0e0;
+    }
+
+    .subtitle {
+      text-align: center;
+      color: #888;
+      font-size: 0.85rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .status {
+      text-align: center;
+      padding: 0.4rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+      font-size: 0.85rem;
+      background: #2a2a3e;
+    }
+    .status.active { background: #1b4332; color: #95d5b2; }
+    .status.error { background: #4a1a1a; color: #f48c8c; }
+
+    .controls {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-bottom: 1rem;
+    }
+
+    button {
+      padding: 0.6rem 1.2rem;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:disabled { opacity: 0.4; cursor: default; }
+
+    #start-btn {
+      background: #2d6a4f;
+      color: white;
+    }
+    #start-btn:hover:not(:disabled) { background: #40916c; }
+
+    #stop-btn {
+      background: #6b2d2d;
+      color: white;
+    }
+    #stop-btn:hover:not(:disabled) { background: #9b4444; }
+
+    .settings {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+      justify-content: center;
+      align-items: center;
+      margin-bottom: 1.5rem;
+      font-size: 0.85rem;
+    }
+
+    .settings label {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+
+    select, input[type="range"] {
+      background: #2a2a3e;
+      color: #e0e0e0;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 0.3rem;
+    }
+
+    .display-panel {
+      background: #16213e;
+      border-radius: 8px;
+      padding: 1rem;
+      margin-bottom: 1rem;
+    }
+
+    .display-panel h2 {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: #888;
+      margin-bottom: 0.5rem;
+    }
+
+    #notes-display {
+      font-size: 1.6rem;
+      font-weight: bold;
+      color: #a8dadc;
+    }
+
+    #interval-display {
+      font-size: 1.2rem;
+      color: #f4a261;
+      margin-top: 0.3rem;
+    }
+
+    .filter-info {
+      font-size: 1rem;
+      color: #666;
+    }
+    .filter-info.active {
+      color: #95d5b2;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.85rem;
+    }
+
+    th {
+      text-align: left;
+      padding: 0.4rem;
+      border-bottom: 1px solid #333;
+      color: #888;
+      font-size: 0.75rem;
+      text-transform: uppercase;
+    }
+
+    td {
+      padding: 0.4rem;
+      border-bottom: 1px solid #222;
+    }
+
+    .partial-row {
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .partial-row:hover { background: #2a2a3e; }
+    .partial-row.active {
+      background: #1b4332;
+      color: #95d5b2;
+    }
+
+    .hint {
+      text-align: center;
+      color: #555;
+      font-size: 0.8rem;
+      margin-top: 1rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>Piano Interval Filter</h1>
+  <p class="subtitle">Aural tuning trainer — hear coincident partials</p>
+
+  <div id="status" class="status">Press Start to begin</div>
+
+  <div class="controls">
+    <button id="start-btn">Start</button>
+    <button id="stop-btn" disabled>Stop</button>
+  </div>
+
+  <div class="settings">
+    <label>
+      Piano type:
+      <select id="piano-type">
+        <option value="grand">Grand</option>
+        <option value="upright">Upright</option>
+        <option value="spinet">Spinet</option>
+      </select>
+    </label>
+    <label>
+      Filter Q:
+      <input type="range" id="filter-q" min="5" max="100" value="30" step="1" />
+      <span id="filter-q-value">30</span>
+    </label>
+  </div>
+
+  <div class="display-panel">
+    <h2>Detected Notes</h2>
+    <div id="notes-display">—</div>
+    <div id="interval-display">—</div>
+  </div>
+
+  <div class="display-panel">
+    <h2>Filter</h2>
+    <div id="filter-display" class="filter-info">No filter active</div>
+  </div>
+
+  <div class="display-panel">
+    <h2>Coincident Partials</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Partials (m:n)</th>
+          <th>Note 1 Hz</th>
+          <th>Note 2 Hz</th>
+          <th>Center Hz</th>
+          <th>Beat Rate</th>
+        </tr>
+      </thead>
+      <tbody id="partials-table">
+        <tr><td colspan="5">Play two notes to see coincident partials</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="hint">Use headphones to avoid feedback. Click a partial row to filter it.</p>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

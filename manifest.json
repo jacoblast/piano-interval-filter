@@ -1,0 +1,10 @@
+{
+  "name": "Piano Interval Filter",
+  "short_name": "IntervalFilter",
+  "description": "Real-time piano interval detection with coincident partial filtering for aural tuning training",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1a2e",
+  "theme_color": "#1a1a2e",
+  "icons": []
+}
