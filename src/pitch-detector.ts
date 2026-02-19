@@ -24,7 +24,7 @@ export interface PitchDetectorConfig {
   pianoType: PianoType;
   minMidi: number;  // lowest note to detect (default: 21 = A0)
   maxMidi: number;  // highest note to detect (default: 108 = C8)
-  hpsOrder: number; // number of HPS downsampling stages (default: 5)
+  hpsOrder: number; // number of HPS downsampling stages (default: 3)
   secondNoteMinConfidence: number; // min confidence for detectWithKnown (default: 0.15)
   subtractionStrength: number;     // harmonic subtraction factor 0-1 (default: 0.92)
   harmonicRejectCents: number;     // reject 2nd note within N cents of any partial (default: 40)
@@ -36,7 +36,7 @@ const DEFAULT_CONFIG: PitchDetectorConfig = {
   pianoType: 'grand',
   minMidi: 21,
   maxMidi: 108,
-  hpsOrder: 5,
+  hpsOrder: 3,
   secondNoteMinConfidence: 0.15,
   subtractionStrength: 0.92,
   harmonicRejectCents: 40,
@@ -97,14 +97,16 @@ export class PitchDetector {
   }
 
   /**
-   * Harmonic Product Spectrum pitch detection.
+   * Inharmonicity-aware Harmonic Product Spectrum pitch detection.
    *
-   * Multiplies the spectrum with downsampled versions of itself.
-   * The product peaks at the fundamental frequency even if the
-   * fundamental partial is weak or missing.
+   * Standard HPS assumes partials at exact integer multiples (2f, 3f, ...),
+   * which breaks for piano strings above ~G4 where inharmonicity shifts
+   * partials sharp. Instead, we compute actual partial positions using the
+   * inharmonicity model f_n = n * f0 * sqrt(1 + B * n²) for each candidate
+   * fundamental.
    */
   private hpsDetect(spectrum: Float32Array): DetectedNote | null {
-    const { hpsOrder, minMidi, maxMidi } = this.config;
+    const { hpsOrder, minMidi, maxMidi, pianoType } = this.config;
     const minBin = Math.max(1, Math.floor(this.freqToBin(this.midiToFreq(minMidi))));
     const maxBin = Math.min(
       Math.floor(spectrum.length / hpsOrder),
@@ -113,12 +115,19 @@ export class PitchDetector {
 
     if (minBin >= maxBin) return null;
 
-    // Compute HPS
+    // Compute inharmonicity-aware HPS
     const hps = new Float32Array(maxBin);
     for (let bin = minBin; bin < maxBin; bin++) {
+      const f0 = bin * this.binResolution;
+      const midi = freqToMidi(f0);
+      const key = midiToKey(Math.round(midi));
+      const B = getInharmonicityB(Math.max(1, Math.min(88, key)), pianoType);
+
       let product = spectrum[bin];
       for (let h = 2; h <= hpsOrder; h++) {
-        const hBin = bin * h;
+        // Use actual inharmonic partial position instead of bin * h
+        const partialFreq = partialFrequency(f0, h, B);
+        const hBin = Math.round(this.freqToBin(partialFreq));
         if (hBin < spectrum.length) {
           product *= spectrum[hBin];
         } else {
