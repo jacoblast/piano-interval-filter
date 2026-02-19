@@ -14,6 +14,13 @@ export function initUI(): void {
   const pianoSelect = document.getElementById('piano-type') as HTMLSelectElement;
   const filterQSlider = document.getElementById('filter-q') as HTMLInputElement;
   const filterQValue = document.getElementById('filter-q-value') as HTMLSpanElement;
+  const thresholdSlider = document.getElementById('threshold') as HTMLInputElement;
+  const thresholdValue = document.getElementById('threshold-value') as HTMLSpanElement;
+  const holdTimeSlider = document.getElementById('hold-time') as HTMLInputElement;
+  const holdTimeValue = document.getElementById('hold-time-value') as HTMLSpanElement;
+  const levelBar = document.getElementById('level-bar') as HTMLElement;
+  const levelDb = document.getElementById('level-db') as HTMLElement;
+  const thresholdMarker = document.getElementById('threshold-marker') as HTMLElement;
   const notesDisplay = document.getElementById('notes-display') as HTMLElement;
   const intervalDisplay = document.getElementById('interval-display') as HTMLElement;
   const filterDisplay = document.getElementById('filter-display') as HTMLElement;
@@ -52,8 +59,32 @@ export function initUI(): void {
     filterQValue.textContent = q.toFixed(0);
   });
 
+  thresholdSlider.addEventListener('input', () => {
+    const db = parseFloat(thresholdSlider.value);
+    engine.setThreshold(db);
+    thresholdValue.textContent = `${db} dB`;
+    // Update marker position: map [-80, -10] to [0%, 100%]
+    const pct = ((db - (-80)) / ((-10) - (-80))) * 100;
+    thresholdMarker.style.left = `${pct}%`;
+  });
+
+  holdTimeSlider.addEventListener('input', () => {
+    const frames = parseInt(holdTimeSlider.value);
+    engine.setHoldTime(frames);
+    holdTimeValue.textContent = `${frames} frames`;
+  });
+
   // State updates
   engine.setStateCallback((state: AudioEngineState) => {
+    // Level meter
+    const clampedDb = Math.max(-80, Math.min(-10, state.peakDb));
+    const pct = ((clampedDb - (-80)) / ((-10) - (-80))) * 100;
+    levelBar.style.width = `${pct}%`;
+    levelBar.classList.toggle('gate-open', state.gateOpen);
+    levelDb.textContent = state.peakDb > -Infinity
+      ? `${state.peakDb.toFixed(0)} dB`
+      : '— dB';
+
     // Notes
     if (state.notes.length === 0) {
       notesDisplay.textContent = '—';

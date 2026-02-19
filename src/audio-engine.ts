@@ -29,6 +29,9 @@ export interface AudioEngineState {
   activeFilterFreq: number | null;
   activeFilterQ: number;
   intervalLabel: string;
+  peakDb: number; // current peak dB level (for metering)
+  thresholdDb: number;
+  gateOpen: boolean;
 }
 
 export type StateCallback = (state: AudioEngineState) => void;
@@ -45,6 +48,17 @@ export class AudioEngine {
   private onStateChange: StateCallback | null = null;
   private pianoType: PianoType = 'grand';
   private filterQ: number = 30;
+  private thresholdDb: number = -50;
+  private holdFrames: number = 20; // ~333ms at 60fps
+
+  // Smoothing state
+  private lockedNotes: DetectedNote[] = [];
+  private lockedInterval: string = '';
+  private lockedPartials: CoincidentPartial[] = [];
+  private lockedFilterFreq: number | null = null;
+  private framesSinceGoodDetection: number = Infinity;
+  private consecutiveNewInterval: number = 0;
+  private pendingInterval: string = '';
 
   // State
   private state: AudioEngineState = {
@@ -54,6 +68,9 @@ export class AudioEngine {
     activeFilterFreq: null,
     activeFilterQ: 30,
     intervalLabel: '',
+    peakDb: -Infinity,
+    thresholdDb: -50,
+    gateOpen: false,
   };
 
   constructor() {
@@ -75,6 +92,15 @@ export class AudioEngine {
       this.bandpass.Q.value = q;
     }
     this.state.activeFilterQ = q;
+  }
+
+  setThreshold(db: number): void {
+    this.thresholdDb = db;
+    this.state.thresholdDb = db;
+  }
+
+  setHoldTime(frames: number): void {
+    this.holdFrames = frames;
   }
 
   async start(): Promise<void> {
@@ -148,59 +174,159 @@ export class AudioEngine {
     this.state.coincidentPartials = [];
     this.state.activeFilterFreq = null;
     this.state.intervalLabel = '';
+    this.state.peakDb = -Infinity;
+    this.state.gateOpen = false;
+    this.lockedNotes = [];
+    this.lockedInterval = '';
+    this.lockedPartials = [];
+    this.lockedFilterFreq = null;
+    this.framesSinceGoodDetection = Infinity;
+    this.consecutiveNewInterval = 0;
+    this.pendingInterval = '';
     this.emitState();
   }
 
   /**
    * Main analysis loop — runs on requestAnimationFrame (~60fps).
    * Pitch detection and filter updates happen here.
+   *
+   * Threshold gate: if peak dB is below threshold, skip detection.
+   * Smoothing: lock detected interval and hold it through transient dropouts.
+   * Only change when a new interval is consistent for several frames,
+   * or when signal drops below threshold.
    */
   private analyze = (): void => {
     if (!this.analyser || !this.magnitudes || !this.ctx) return;
 
-    // Get frequency data (linear magnitude, not dB)
-    // getByteFrequencyData gives 0-255 log scale, which loses resolution.
-    // Instead we use getFloatFrequencyData (dB) and convert to linear.
     const dBData = new Float32Array(this.analyser.frequencyBinCount);
     this.analyser.getFloatFrequencyData(dBData);
 
-    // Convert dB to linear magnitude
+    // Compute peak dB for metering and gating
+    let peakDb = -Infinity;
+    for (let i = 0; i < dBData.length; i++) {
+      if (dBData[i] > peakDb) peakDb = dBData[i];
+    }
+    this.state.peakDb = peakDb;
+
+    const gateOpen = peakDb >= this.thresholdDb;
+    this.state.gateOpen = gateOpen;
+
+    if (!gateOpen) {
+      // Signal below threshold — clear everything after hold expires
+      this.framesSinceGoodDetection++;
+      if (this.framesSinceGoodDetection > this.holdFrames) {
+        this.lockedNotes = [];
+        this.lockedInterval = '';
+        this.lockedPartials = [];
+        this.lockedFilterFreq = null;
+        this.consecutiveNewInterval = 0;
+        this.pendingInterval = '';
+        this.state.notes = [];
+        this.state.coincidentPartials = [];
+        this.state.intervalLabel = '';
+        this.clearFilter();
+      } else {
+        // Still within hold period — show locked state
+        this.state.notes = this.lockedNotes;
+        this.state.coincidentPartials = this.lockedPartials;
+        this.state.intervalLabel = this.lockedInterval;
+        if (this.lockedFilterFreq !== null) {
+          this.setFilter(this.lockedFilterFreq);
+        }
+      }
+      this.emitState();
+      this.animFrameId = requestAnimationFrame(this.analyze);
+      return;
+    }
+
+    // Gate is open — convert dB to linear and detect
     for (let i = 0; i < dBData.length; i++) {
       this.magnitudes[i] = Math.pow(10, dBData[i] / 20);
     }
 
-    // Detect pitches
     const notes = this.detector.detect(this.magnitudes);
-    this.state.notes = notes;
 
     if (notes.length === 2) {
       const [low, high] = notes;
       const semitones = Math.round(high.midi - low.midi);
-
-      // Get inharmonicity for both notes
-      const key1 = midiToKey(low.midi);
-      const key2 = midiToKey(high.midi);
-      const B1 = getInharmonicityB(Math.max(1, Math.min(88, key1)), this.pianoType);
-      const B2 = getInharmonicityB(Math.max(1, Math.min(88, key2)), this.pianoType);
-
-      // Find coincident partials
-      const coincident = findCoincidentPartials(
-        midiToFreq(low.midi), midiToFreq(high.midi),
-        B1, B2, 16, 80
-      );
-
-      this.state.coincidentPartials = coincident;
-      this.state.intervalLabel =
+      const currentInterval =
         `${midiToNoteName(low.midi)} - ${midiToNoteName(high.midi)} (${intervalName(semitones)})`;
 
-      // Set bandpass to the lowest coincident partial
-      if (coincident.length > 0) {
-        const target = coincident[0];
-        this.setFilter(target.centerFreq);
+      // Smoothing: check if this matches the pending new interval
+      if (currentInterval === this.lockedInterval) {
+        // Same as locked — reinforce lock
+        this.framesSinceGoodDetection = 0;
+        this.consecutiveNewInterval = 0;
+        this.pendingInterval = '';
+      } else if (currentInterval === this.pendingInterval) {
+        // Same as pending — increment consistency counter
+        this.consecutiveNewInterval++;
+      } else {
+        // New interval — start tracking
+        this.pendingInterval = currentInterval;
+        this.consecutiveNewInterval = 1;
+      }
+
+      // Accept new interval after enough consistent frames (or if nothing locked)
+      const requiredFrames = this.lockedInterval ? 4 : 1;
+      if (this.consecutiveNewInterval >= requiredFrames || !this.lockedInterval) {
+        // Lock in the new detection
+        this.lockedNotes = notes;
+        this.lockedInterval = currentInterval;
+        this.framesSinceGoodDetection = 0;
+        this.consecutiveNewInterval = 0;
+        this.pendingInterval = '';
+
+        // Compute coincident partials for locked notes
+        const key1 = midiToKey(low.midi);
+        const key2 = midiToKey(high.midi);
+        const B1 = getInharmonicityB(Math.max(1, Math.min(88, key1)), this.pianoType);
+        const B2 = getInharmonicityB(Math.max(1, Math.min(88, key2)), this.pianoType);
+        this.lockedPartials = findCoincidentPartials(
+          midiToFreq(low.midi), midiToFreq(high.midi),
+          B1, B2, 16, 80
+        );
+        this.lockedFilterFreq = this.lockedPartials.length > 0
+          ? this.lockedPartials[0].centerFreq
+          : null;
+      }
+
+      // Show locked state (stable)
+      this.state.notes = this.lockedNotes;
+      this.state.coincidentPartials = this.lockedPartials;
+      this.state.intervalLabel = this.lockedInterval;
+      if (this.lockedFilterFreq !== null) {
+        this.setFilter(this.lockedFilterFreq);
       } else {
         this.clearFilter();
       }
-    } else if (notes.length < 2) {
+    } else if (this.lockedInterval) {
+      // Fewer than 2 notes but we have a locked result — hold it
+      this.framesSinceGoodDetection++;
+      if (this.framesSinceGoodDetection > this.holdFrames) {
+        // Hold expired
+        this.lockedNotes = [];
+        this.lockedInterval = '';
+        this.lockedPartials = [];
+        this.lockedFilterFreq = null;
+        this.state.notes = notes; // show whatever we have (0 or 1 note)
+        this.state.coincidentPartials = [];
+        this.state.intervalLabel = notes.length === 1
+          ? midiToNoteName(notes[0].midi)
+          : '';
+        this.clearFilter();
+      } else {
+        // Still holding
+        this.state.notes = this.lockedNotes;
+        this.state.coincidentPartials = this.lockedPartials;
+        this.state.intervalLabel = this.lockedInterval;
+        if (this.lockedFilterFreq !== null) {
+          this.setFilter(this.lockedFilterFreq);
+        }
+      }
+    } else {
+      // No locked result, fewer than 2 notes
+      this.state.notes = notes;
       this.state.coincidentPartials = [];
       this.state.intervalLabel = notes.length === 1
         ? midiToNoteName(notes[0].midi)
@@ -233,6 +359,7 @@ export class AudioEngine {
     if (index >= 0 && index < this.state.coincidentPartials.length) {
       const target = this.state.coincidentPartials[index];
       this.setFilter(target.centerFreq);
+      this.lockedFilterFreq = target.centerFreq;
     }
   }
 

@@ -161,6 +161,52 @@
       color: #95d5b2;
     }
 
+    .level-meter-container {
+      margin-bottom: 1rem;
+      padding: 0 0.5rem;
+    }
+
+    .level-meter {
+      position: relative;
+      height: 10px;
+      background: #2a2a3e;
+      border-radius: 5px;
+      overflow: visible;
+    }
+
+    .level-bar {
+      height: 100%;
+      border-radius: 5px;
+      width: 0%;
+      transition: width 0.06s linear;
+      background: #2d6a4f;
+    }
+
+    .level-bar.gate-open {
+      background: #40916c;
+    }
+
+    .threshold-marker {
+      position: absolute;
+      top: -3px;
+      width: 2px;
+      height: 16px;
+      background: #f4a261;
+      border-radius: 1px;
+    }
+
+    .level-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.7rem;
+      color: #666;
+      margin-top: 2px;
+    }
+
+    #level-db {
+      font-weight: bold;
+    }
+
     .hint {
       text-align: center;
       color: #555;
@@ -194,6 +240,28 @@
       <input type="range" id="filter-q" min="5" max="100" value="30" step="1" />
       <span id="filter-q-value">30</span>
     </label>
+    <label>
+      Threshold:
+      <input type="range" id="threshold" min="-80" max="-10" value="-50" step="1" />
+      <span id="threshold-value">-50 dB</span>
+    </label>
+    <label>
+      Hold:
+      <input type="range" id="hold-time" min="1" max="60" value="20" step="1" />
+      <span id="hold-time-value">20 frames</span>
+    </label>
+  </div>
+
+  <div class="level-meter-container">
+    <div class="level-meter">
+      <div id="level-bar" class="level-bar"></div>
+      <div id="threshold-marker" class="threshold-marker" style="left: 37.5%"></div>
+    </div>
+    <div class="level-labels">
+      <span>-80 dB</span>
+      <span id="level-db">— dB</span>
+      <span>-10 dB</span>
+    </div>
   </div>
 
   <div class="display-panel">
