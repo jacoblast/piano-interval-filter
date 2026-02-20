@@ -7,16 +7,17 @@
  * where B is the inharmonicity coefficient that depends on string
  * stiffness, length, diameter, and tension.
  *
- * B values follow a characteristic V-shaped curve across the keyboard:
- * - Decreasing through the wound bass strings (A0 ~ E3)
- * - Minimum near the bass-treble break (~E3/F3)
- * - Increasing through the plain steel treble strings (F3 ~ C8)
+ * B is modelled as a two-term exponential in MIDI note number m:
+ *   B(m) = exp(sB*m + yB) + exp(sT*m + yT)
  *
- * Data sources:
- * - Steinway B grand: A0=0.000312, A3=0.000214, A4=0.000751
- * - Anderson & Strong (2005) Yamaha P22 upright
- * - UBC study (2021) Kimball & Yamaha uprights
- * - Fletcher (1964) Hamilton upright
+ * The bass term (sB < 0) decays with rising pitch; the treble term
+ * (sT > 0) grows. Their sum produces the characteristic V-shaped
+ * curve with a smooth crossover near the bass-treble break.
+ *
+ * Coefficients fitted from measurements on:
+ * - Steinway B grand piano
+ * - Upright piano
+ * - Spinet piano
  */
 
 export type PianoType = 'grand' | 'upright' | 'spinet';
@@ -45,54 +46,34 @@ export function freqToMidi(freq: number): number {
 }
 
 /**
- * Generic inharmonicity coefficient B for a given piano key (1-88).
+ * Measured inharmonicity coefficients per piano type.
  *
- * This uses a piecewise exponential model fitted to published measurements.
- * The bass-treble break is around key 28-32 (E3-G#3) depending on piano type.
+ * B(m) = exp(sB*m + yB) + exp(sT*m + yT)
  *
- * For grand pianos, the curve is lower overall due to longer strings.
- * For spinets, higher overall due to shorter strings.
+ * where m is the MIDI note number. The first term (bass) decays with
+ * increasing pitch; the second term (treble) grows. Their sum produces
+ * the characteristic V-shaped curve with a smooth crossover near the
+ * bass-treble break.
+ *
+ * Fitted from measured data on real instruments.
+ */
+const INHARMONICITY_COEFFS: Record<PianoType, { sB: number; yB: number; sT: number; yT: number }> = {
+  grand:   { sT:  0.09734982433, sB: -0.05083193872, yT: -14.02605102, yB: -7.676408327 },
+  upright: { sT:  0.1151438886,  sB: -0.04752372189, yT: -15.51272618, yB: -7.178504653 },
+  spinet:  { sT:  0.0958,        sB: -0.0528,        yT: -14.0,        yB: -5.88         },
+};
+
+/**
+ * Inharmonicity coefficient B for a given piano key (1-88).
+ *
+ * Uses a two-term exponential model fitted to measured data:
+ *   B(m) = exp(sB*m + yB) + exp(sT*m + yT)
+ * where m is the MIDI note number.
  */
 export function getInharmonicityB(key: number, pianoType: PianoType = 'grand'): number {
-  // Scale factor relative to grand piano
-  const typeScale: Record<PianoType, number> = {
-    grand: 1.0,
-    upright: 1.8,
-    spinet: 3.0,
-  };
-
-  const scale = typeScale[pianoType];
-
-  // Bass-treble break point (key number where wound strings end)
-  const breakKey: Record<PianoType, number> = {
-    grand: 30,   // ~F#3
-    upright: 28,  // ~E3
-    spinet: 28,
-  };
-
-  const bk = breakKey[pianoType];
-
-  let B: number;
-
-  if (key <= bk) {
-    // Wound bass strings: B decreases from bass toward the break
-    // Based on Steinway B data: A0 (key 1) ~ 0.000312, break ~ 0.00015
-    // Exponential decay from bass to break
-    const bassHigh = 0.00035 * scale;  // B at key 1 (A0)
-    const bassLow = 0.00012 * scale;   // B at break point
-    const t = (key - 1) / (bk - 1);
-    B = bassHigh * Math.pow(bassLow / bassHigh, t);
-  } else {
-    // Plain steel treble strings: B increases from break toward top
-    // Based on data: break ~ 0.00015, A4 (key 49) ~ 0.00075
-    // Extrapolating: C8 (key 88) ~ 0.1-0.4
-    const trebleLow = 0.00015 * scale;   // B at break point
-    const trebleHigh = 0.15 * scale;     // B at key 88 (C8)
-    const t = (key - bk) / (88 - bk);
-    B = trebleLow * Math.pow(trebleHigh / trebleLow, t);
-  }
-
-  return B;
+  const m = key + 20; // convert piano key (1-88) to MIDI note (21-108)
+  const c = INHARMONICITY_COEFFS[pianoType];
+  return Math.exp(c.sB * m + c.yB) + Math.exp(c.sT * m + c.yT);
 }
 
 /**
